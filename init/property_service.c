@@ -67,6 +67,7 @@ struct {
     { "net.gprs.",        AID_RADIO,    0 },
     { "net.ppp",          AID_RADIO,    0 },
     { "net.qmi",          AID_RADIO,    0 },
+    { "ril.pcui",	      AID_RADIO,    0 },
     { "net.lte",          AID_RADIO,    0 },
     { "net.cdma",         AID_RADIO,    0 },
     { "ril.",             AID_RADIO,    0 },
@@ -94,6 +95,11 @@ struct {
     { "persist.security.", AID_SYSTEM,   0 },
     { "persist.service.bdroid.", AID_BLUETOOTH,   0 },
     { "selinux."         , AID_SYSTEM,   0 },
+    { "audio.routing",    AID_MEDIA,     0 },
+    { "mediasw.",         AID_MEDIA,     0 },
+    { "persist.mediasw.", AID_MEDIA,     0 },
+    { "audio.output.active", AID_MEDIA,   0 },
+    { "audio.input.active",  AID_MEDIA,   0 },
     { NULL, 0, 0 }
 };
 
@@ -285,6 +291,11 @@ static int check_perms(const char *name, unsigned int uid, unsigned int gid, cha
     int i;
     if(!strncmp(name, "ro.", 3))
         name +=3;
+	
+	if(0 == strcmp(name,"wlan.wfddnsmasq.peer") ||
+	    0 == strcmp(name, "audio.hdmi.expected") ||
+	    0 == strcmp(name, "audio.hdmi.available"))
+		return 1;
 
     if (uid == 0)
         return check_mac_perms(name, sctx);

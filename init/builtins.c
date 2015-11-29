@@ -239,9 +239,42 @@ int do_domainname(int nargs, char **args)
     return write_file("/proc/sys/kernel/domainname", args[1]);
 }
 
+/*exec <path> <arg1> <arg2> ... */
+#define MAX_PARAMETERS 64
 int do_exec(int nargs, char **args)
 {
-    return -1;
+    pid_t pid;
+    int status, i, j;
+    char *par[MAX_PARAMETERS];
+    if (nargs > MAX_PARAMETERS)
+    {
+        return -1;
+    }
+    for(i=0, j=1; i<(nargs-1) ;i++,j++)
+    {
+        par[i] = args[j];
+    }
+    par[i] = (char*)0;
+    pid = fork();
+    if (!pid)
+    {
+        char tmp[32];
+        int fd, sz;
+        get_property_workspace(&fd, &sz);
+        sprintf(tmp, "%d,%d", dup(fd), sz);
+        setenv("ANDROID_PROPERTY_WORKSPACE", tmp, 1);
+        execve(par[0],par,environ);
+        exit(0);
+    }
+    else
+    {
+        waitpid(pid, &status, 0);
+        if (WEXITSTATUS(status) != 0) {
+            ERROR("exec: pid %1d exited with return code %d: %s", (int)pid, WEXITSTATUS(status), strerror(status));
+        }
+
+    }
+    return 0;
 }
 
 int do_export(int nargs, char **args)
@@ -536,6 +569,17 @@ int do_setenforce(int nargs, char **args) {
     return 0;
 }
 
+int do_umount(int nargs, char **args)
+{
+    ERROR("do_umount: %s \n", args[1]);
+    if(-1 == umount(args[1]) )
+    {
+        ERROR("do_umount error = %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 int do_setkey(int nargs, char **args)
 {
     struct kbentry kbe;
@@ -818,3 +862,357 @@ int do_wait(int nargs, char **args)
     } else
         return -1;
 }
+
+/* setupfs, format a device to ext4 */
+const char *mkfs = "/system/bin/make_ext4fs";
+
+int setup_fs(const char *blockdev)
+{
+    char buf[256], path[128];
+    pid_t child;
+    int status, n;
+
+    /* we might be looking at an indirect reference */
+    n = readlink(blockdev, path, sizeof(path) - 1);
+    //weng: fix the readlink error!
+    if (n < 0) {
+        fprintf(stderr, "readlink err: %d\n", errno);
+        n = strlen(blockdev);
+        strcpy(path, blockdev);
+    }
+    //weng: ====
+    if (n > 0) {
+        path[n] = 0;
+        if (!memcmp(path, "/dev/block/", 11))
+            blockdev = path + 11;
+    }
+
+
+    if (strchr(blockdev,'/')) {
+        fprintf(stderr,"not a block device name: %s\n", blockdev);
+        return 0;
+    }
+
+    sprintf(buf,"/sys/fs/ext4/%s", blockdev);
+    if (access(buf, F_OK) == 0) {
+        fprintf(stderr,"device %s already has a filesystem\n", blockdev);
+        return 0;
+    }
+    sprintf(buf,"/dev/block/%s", blockdev);
+
+    fprintf(stderr,"+++\n");
+
+tryagain:
+    ERROR("buffer : %s", buf);
+    child = fork();
+    if (child < 0) {
+        fprintf(stderr,"error: fork failed\n");
+        return 0;
+    }
+    if (child == 0) {
+        execl(mkfs, mkfs, buf, NULL);
+    }else{
+        waitpid(child, &status, 0);
+        if (WEXITSTATUS(status) != 0) {
+            ERROR("exec: pid %1d exited with return code %d: %s", (int)child, WEXITSTATUS(status), strerror(status));
+            sleep(3);
+            goto tryagain;
+        }
+    }
+
+    //while (waitpid(-1, &status, 0) != child) ;
+
+    return 1;
+}
+
+int do_setupfs(int argc, char **argv)
+{
+    int need_reboot = 0;
+
+    fprintf(stderr, "setup_fs v0.1\n");
+
+    return setup_fs(argv[1]);
+}
+int do_format_userdata(int argc, char **argv)
+{
+    const char *devicePath = argv[1];
+    char bootsector[512];
+    char lable[32];
+    int fd;
+    int num;
+    pid_t child;
+    int status;
+
+    fd = open(devicePath, O_RDONLY);
+    if( fd <= 0 ) {
+        ERROR("open device error :%s", strerror(errno));
+        return 1;
+    }
+    memset(bootsector, 0, 512);
+    read(fd, bootsector, 512);
+    close(fd);
+    if( (bootsector[510]==0x55) && (bootsector[511]==0xaa) )
+    {
+        ERROR("dont need format %s", devicePath);
+        return 1;
+    }
+    else 
+    {
+        ERROR("start format %s", devicePath);
+        child = fork();
+        if (child == 0) {
+            ERROR("fork to format %s", devicePath);
+            execl("/system/bin/logwrapper","/system/bin/logwrapper","/system/bin/newfs_msdos","-F","32","-O","android","-c","8", "-L",argv[2],argv[1], NULL);
+            exit(-1);
+        }
+        ERROR("wait for format %s", devicePath);
+        while (waitpid(-1, &status, 0) != child) ;
+        ERROR("format %s ok", devicePath);
+        return 1;
+    }
+}
+
+int do_insmod_modules(int argc, char **argv)
+{
+    const char *modules = argv[1];
+    int ret = 0;
+
+    FILE *fp = NULL;
+    int back_name_len = 0;
+    int back_node_len = 0;
+    int front_name_len = 0;
+    int front_node_len = 0;
+    //int camera_num = 0;
+
+    char back_name[64];
+    char back_node[64];
+    char front_name[64];
+    char front_node[64];
+    //char num[1];
+
+    char str[128];
+
+    memset(back_name, 0, 64);
+    memset(back_node, 0, 64);
+    memset(front_name, 0, 64);
+    memset(front_node, 0, 64);
+    //memset(num, 0, 1);
+
+    memset(str, 0, 128);
+
+    if (strstr(modules, "camera"))
+    {
+        //fopen back_name
+        fp = fopen("/sys/devices/camera/back_name", "r");
+        if (NULL == fp )
+        {
+            ERROR("fopen /sys/devices/camera/back_name failed, waitting for 2ms time");
+            usleep(2000);
+            fp = fopen("/sys/devices/camera/back_name", "r");
+        }
+
+        if (NULL != fp)
+        {
+            back_name_len = fread(back_name, 1, 64, fp);
+            fclose(fp);
+            fp = NULL;
+        }
+        else
+        {
+            ERROR("fopen /sys/devices/camera/back_name failed");
+        }
+
+        //fopen back_node
+        fp = fopen("/sys/devices/camera/back_node", "r");
+        if (NULL != fp)
+        {
+            back_node_len = fread(back_node, 1, 64, fp);
+            fclose(fp);
+            fp = NULL;
+        }
+        else
+        {
+            ERROR(" fopen /sys/devices/camera/back_node failed");
+        }
+
+        //fopen front_name
+        fp = fopen("/sys/devices/camera/front_name", "r");
+        if (NULL != fp)
+        {
+            front_name_len = fread(front_name, 1, 64, fp);
+            fclose(fp);
+            fp = NULL;
+        }
+        else
+        {
+            ERROR(" fopen /sys/devices/camera/front_name failed");
+        }
+
+        //fopen front_node
+        fp = fopen("/sys/devices/camera/front_node", "r");
+        if (NULL != fp)
+        {
+            front_node_len = fread(front_node, 1, 64, fp);
+            fclose(fp);
+            fp = NULL;
+        }
+        else
+        {
+            ERROR("fopen /sys/devices/camera/front_node failed");
+        }
+        /*
+        //fopen num
+        fp = fopen("/sys/devices/camera/num", "r");
+        if (NULL != fp)
+        {
+            fread(num, 1, 1, fp);
+            fclose(fp);
+            fp = NULL;
+            camera_num = (int)(num[0] - 0x30);
+        }
+        else
+        {
+            ERROR("fopen /sys/device/camera/num failed");
+        }
+        */
+
+        //insmod back camera
+        if (back_name_len > 0)
+        {
+            memset(str, 0, 128);
+            sprintf(str, "/system/vendor/modules/%s.ko", back_name);
+            ret = insmod(str, "");
+            if(ret < 0)
+            {
+                ERROR("insmod %s, err: %s", str, strerror(errno));
+            }
+        }
+
+        //insmod front camera
+        if (front_name_len > 0)
+        {
+          memset(str, 0, 128);
+            sprintf(str, "/system/vendor/modules/%s.ko", front_name);
+            ret = insmod(str, "");
+            if(ret < 0)
+            {
+                ERROR("insmod %s, err: %s", str, strerror(errno));
+            }
+        }
+
+        //insmod back node
+        if (back_node_len > 0)
+        {
+            memset(str, 0, 128);
+            sprintf(str, "/system/vendor/modules/%s.ko", back_node);
+            ret = insmod(str, "");
+            if(ret < 0)
+            {
+                ERROR("insmod %s, err: %s", str, strerror(errno));
+            }
+        }
+
+        //insmod front node
+        if (front_node_len > 0)
+        {
+          memset(str, 0, 128);
+            sprintf(str, "/system/vendor/modules/%s.ko", front_node);
+            ret = insmod(str, "");
+            if(ret < 0)
+            {
+                ERROR("insmod %s, err: %s", str, strerror(errno));
+            }
+        }
+    }
+    else
+    {
+        ERROR("insmod_modules insmod camera failed");
+    }
+
+    return 1;
+}
+
+#define PIPE_NAME "/.e2fsck_in"
+#define MSG_LEN 256
+
+
+#define C_IN_START 0x01
+#define C_IN_NEEDFIX 0x02
+#define C_IN_PROCESS 0x04
+#define C_IN_FINISH 0x08
+
+
+struct cmdpacket {
+    unsigned char cmd;
+    unsigned char valid_len;
+    unsigned char message[MSG_LEN];
+    unsigned char dxor;
+};
+
+int do_dispe2fsck(int nargs,char **args)
+{
+    int child;
+    int ret;
+    int status;
+    int currstate;
+    int pipe_fd;
+    int exit_cycle = 0;
+    struct cmdpacket cpt = {0};
+
+    if (access(PIPE_NAME,F_OK)==-1){
+        if(mkfifo(PIPE_NAME,O_CREAT|O_RDWR|0666)!=0){
+            ERROR("create e2fsck pipe error!\n");
+            return 0;
+        }
+    }
+    child = fork();
+    if (child > 0) {
+        //execl("/system/bin/logwrapper","/system/bin/logwrapper","/system/bin/e2fsck","-y",args[1], NULL);
+        return 0;
+    } else if(child == 0 ){
+        pipe_fd=open(PIPE_NAME,O_RDONLY|O_NONBLOCK);
+        if (pipe_fd==-1){
+            ERROR("open e2fsck pipe error\n");
+            return 0;
+        }
+        ERROR("start e2fsck listening...");
+        while (!exit_cycle) {
+            ret = waitpid(-1,&status,WNOHANG);
+            if(child == ret){
+                exit_cycle=1;
+            }
+            ret = read(pipe_fd,&cpt,sizeof(cpt));
+            if(ret!=sizeof(cpt)){
+                sleep(1);
+                continue;
+            }
+            switch(cpt.cmd){
+                case C_IN_START:
+                    ERROR("C_IN_START");
+                    ERROR("path = %s",cpt.message);
+                    break;
+                case C_IN_NEEDFIX:
+                    ERROR("C_IN_NEEDFIX");
+                    //load_argb8888_image("/needfix.rle");
+                    break;
+                case C_IN_PROCESS:
+                    ERROR("C_IN_PROCESS");
+                    break;
+                case C_IN_FINISH:
+                    ERROR("C_IN_FINISH");
+                    exit_cycle=1;
+                    break;
+                default:
+                    ERROR("undefined commond");
+                    break;
+            }
+        }
+        close(pipe_fd);
+        unlink(PIPE_NAME);
+        ERROR("e2fsck %s ok", args[1]);
+    }else{
+        ERROR("fork error");
+    }
+    return 1;
+}
+
